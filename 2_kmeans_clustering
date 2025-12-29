@@ -63,9 +63,9 @@ calc_normalized_d <- function(dist_val, min_d, max_d) {
 
 ################## 3. CORE LOGIC (Section 2.2.3)
 analyze_transition_potential <- function(crop_id, base_k) {
-  
   message(paste0("\n--- Processing Crop System ID: ", crop_id, " ---"))
-  
+
+
   # --- Step A: Variable Selection ---
   # Loads feature importance to identify the specific variables for the group "climate variation".
   
@@ -94,7 +94,8 @@ analyze_transition_potential <- function(crop_id, base_k) {
 
   
   # --- Step B: K-means Clustering ---
-  
+  # Optimal k was selected by maximizing the average Silhouette Score
+
   k_range <- base_k:(2 * base_k)
   metrics <- data.frame()
   models  <- list()
@@ -102,7 +103,6 @@ analyze_transition_potential <- function(crop_id, base_k) {
   for (k in k_range) {
     km <- kmeans(multi_mtx, centers = k, iter.max = 150, nstart = 40)
     
-    # Methodology: "Optimal k was selected by maximizing the average Silhouette Score"
     sil <- summary(cluster::silhouette(km$cluster, dist(multi_mtx)))$avg.width
     metrics <- rbind(metrics, data.frame(k = k, silhouette = sil))
     models[[as.character(k)]] <- km
@@ -156,10 +156,11 @@ analyze_transition_potential <- function(crop_id, base_k) {
     mutate(normalized_D = calc_normalized_d(dist, min_d, max_d)) %>%
     ungroup() %>%
     select(ID, cluster, normalized_D)
-  
+
+
   # --- Step E: Save Result ---
-  
   # Merge back with coordinates
+
   final_output <- single_mtx %>%
     mutate(ID = rownames(.)) %>%
     inner_join(final_D_values, by = "ID") %>%
