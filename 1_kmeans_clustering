@@ -1,262 +1,185 @@
-# ===================================================================================
-# SCRIPT: K-means Clustering & Distance Analysis
-# DESCRIPTION: 
-#   This script performs Kernel K-means clustering to analyze the distance 
-#   between single cropping and multi cropping systems. It identifies optimal 
-#   clusters using Silhouette scores and filters suitable grids with single cropping.
-# ===================================================================================
+# ==========================================================================================
+# ARTICLE: Assessing the global potential for transition from single to multiple cropping
+# METHODOLOGY: Section 2.2.3
+#
+# DESCRIPTION:
+# This script calculates the normalized distance (D) between single cropping 
+# grids and multiple cropping clusters for a specific variable group (e.g., climate variation).
+#
+# The output of this script is the 'D' value used in Equation (2):
+# PoT = Sum(Imp * D)
+#
+# WORKFLOW:
+# 1. Clustering: Apply K-means to multiple cropping data to define "successful" conditions.
+#    - k selection: Maximizing average Silhouette Score.
+# 2. Similarity: Calculate Euclidean distance from single cropping grids to these centroids.
+# 3. Normalization: Normalize distances to [0,1] to allow comparison across groups.
+# ==========================================================================================
 
-# ------------------------------------------------------------------------------
-# 1. SETUP & LIBRARIES
-# ------------------------------------------------------------------------------
+
+
+################## 1. SETUP & LIBRARIES
 if (!require("pacman")) install.packages("pacman")
 pacman::p_load(dplyr, purrr, tidyr, stringr, NbClust, cluster, here)
 
-# Set global options
-options(stringsAsFactors = FALSE)
+# Define paths relative to project root
+INPUT_DIR  <- here::here("data")
+OUTPUT_DIR <- here::here("results", "transition_potential")
 
-# ------------------------------------------------------------------------------
-# 2. CONFIGURATION & PATHS
-# ------------------------------------------------------------------------------
-# NOTE: Ensure your data is in a folder named 'data' and outputs go to 'results'
-# relative to your project root.
-CONFIG <- list(
-  input_dir  = here::here("data"),
-  output_dir = here::here("results", "clustering"),
-  seed       = 215,
-  iter_max   = 150,
-  n_start    = 40
-)
+if (!dir.exists(OUTPUT_DIR)) dir.create(OUTPUT_DIR, recursive = TRUE)
 
-# Create output directory if it doesn't exist
-if (!dir.exists(CONFIG$output_dir)) dir.create(CONFIG$output_dir, recursive = TRUE)
+# Set seed for reproducible K-means clustering
+set.seed(215)
 
-# Simulation parameters: 'crp' (Crop ID) and 'cen_num' (Base cluster number)
-PARAMS <- data.frame(
-  crp     = c(1, 2, 3, 4, 5, 6, 7),
-  cen_num = c(2, 2, 4, 3, 2, 4, 4)
-)
 
-# ------------------------------------------------------------------------------
-# 3. HELPER FUNCTIONS
-# ------------------------------------------------------------------------------
 
-#' Calculate Euclidean distances between a matrix of points and a target vector
-#' @param p1 Matrix or data frame of points (rows are observations)
-#' @param p2 Numeric vector (target point/center)
-#' @return Named vector of distances
+################## 2. HELPER FUNCTIONS
+## Calculate Euclidean Distance 
 calc_euclidean_dist <- function(p1, p2) {
-  # Ensure p2 is a vector
   p2 <- as.numeric(p2)
-  
-  # Vectorized calculation for efficiency
-  distances <- apply(p1, 1, function(x) sqrt(sum((x - p2)^2)))
-  return(distances)
+  apply(p1, 1, function(x) sqrt(sum((x - p2)^2)))
 }
 
-#' Normalize scores based on distance range (0.05 to 0.95 scale)
-#' @param dist_val Numeric distance value
-#' @param min_d Minimum distance in cluster
-#' @param max_d Maximum distance in cluster
-#' @return Normalized score
-calc_score <- function(dist_val, min_d, max_d) {
-  # Avoid division by zero
-  if (max_d == min_d) return(1)
+## Normalize Distance (D)
+##
+## @param dist_val Raw Euclidean distance
+## @param min_d Minimum distance observed in the reference cluster
+## @param max_d Maximum distance observed in the reference cluster
+## @return A normalized value where lower values denote greater similarity.
+calc_normalized_d <- function(dist_val, min_d, max_d) {
+  # Handle single-point clusters
+  if (max_d == min_d) return(0.05) 
   
-  range_val <- ceiling((dist_val - min_d) / (max_d - min_d) * 10)
-  range_val <- ifelse(range_val == 0, 1, range_val)
-  score <- (range_val - 1) / 10 + 0.05
-  return(score)
+  # Map distance to deciles (1-10)
+  range_bin <- ceiling((dist_val - min_d) / (max_d - min_d) * 10)
+  range_bin <- ifelse(range_bin == 0, 1, range_bin)
+  
+  # Scale to [0.05, 0.95]
+  # Result: Low score = Low distance = High Similarity
+  return((range_bin - 1) / 10 + 0.05)
 }
 
-# ------------------------------------------------------------------------------
-# 4. MAIN ANALYSIS FUNCTION
-# ------------------------------------------------------------------------------
 
-run_clustering <- function(m_index) {
+
+################## 3. CORE LOGIC (Section 2.2.3)
+analyze_transition_potential <- function(crop_id, base_k) {
   
-  # --- Step A: Initialization ---
-  crop_id <- PARAMS$crp[m_index]
-  k_base  <- PARAMS$cen_num[m_index]
+  message(paste0("\n--- Processing Crop System ID: ", crop_id, " ---"))
   
-  message(paste0(">>> Processing Crop ID: ", crop_id, " | Base Clusters: ", k_base))
+  # --- Step A: Variable Selection ---
+  # Loads feature importance to identify the specific variables for the group "climate variation".
   
-  # Load Feature Importance Data
-  # Looks for CSV files containing "feaimp" in the results folder
-  feature_files <- list.files(here::here("results"), pattern = "feaimp", full.names = TRUE)
-  feature_files <- feature_files[grep("\\.csv$", feature_files)]
-  
-  if (length(feature_files) < crop_id) stop("Feature importance file missing for index ", crop_id)
-  
-  fea_imp <- read.csv(feature_files[[crop_id]]) %>%
+  feat_file <- list.files(here::here("results"), pattern = "feaimp", full.names = TRUE)[crop_id]
+  fea_imp <- read.csv(feat_file) %>%
     rename(feature = 1) %>%
     mutate(row_num = row_number()) %>%
     filter(cumu_per < 90 | row_num == min(row_num[cumu_per >= 90]))
   
-  # Select Climate Variables based on Regex
-  clim_vars <- fea_imp$feature[str_detect(fea_imp$feature, "^(BIO02|BIO05|BIO11|BIO12|BIO15|gdd5|gdd10|gsl)")]
+  # Select variables (regex can be adjusted for Water/Soil groups in other runs)
+  group_vars <- fea_imp$feature[str_detect(fea_imp$feature, "^(BIO|gdd|gsl)")]
   
-  # Load Crop Data
-  rds_file <- file.path(CONFIG$input_dir, paste0("slice", crop_id, ".rds"))
-  if (!file.exists(rds_file)) stop("Data file not found: ", rds_file)
+  # Load Data
+  crop_df <- readRDS(file.path(INPUT_DIR, paste0("slice", crop_id, ".rds")))
+  dataset <- crop_df %>% select(x, y, TarVar, any_of(group_vars))
   
-  crop_df <- readRDS(rds_file)
+  # Split into Single (Candidate) and Multi (Reference)
+  multi_ref  <- dataset %>% filter(str_detect(TarVar, ".*multi"))
+  single_cand <- dataset %>% filter(str_detect(TarVar, ".*mono"))
   
-  # --- Step B: Data Preparation (Multi vs Single) ---
-  # Select coordinate columns (1:2), Target Variable, and Climate Variables
-  crop_data <- crop_df %>% dplyr::select(all_of(1:2), "TarVar", any_of(clim_vars))
+  multi_mtx  <- multi_ref %>% select(any_of(group_vars))
+  single_mtx <- single_cand %>% select(any_of(group_vars))
   
-  # Split into Multi-cropping (multi) and Single-cropping (single)
-  multi_g <- crop_data %>% filter(str_detect(TarVar, ".*multi"))
-  single_g <- crop_data %>% filter(str_detect(TarVar, ".*mono"))
+  rownames(multi_mtx)  <- paste(multi_ref$x, multi_ref$y, sep = "_")
+  rownames(single_mtx) <- paste(single_cand$x, single_cand$y, sep = "_")
+
   
-  # Extract only the feature columns for clustering (columns 4 to end)
-  multi_features <- multi_g %>% dplyr::select(4:ncol(.))
-  single_features <- single_g %>% dplyr::select(4:ncol(.))
+  # --- Step B: K-means Clustering ---
   
-  # Set row names as coordinate strings "x_y"
-  rownames(multi_features)  <- paste(multi_g[,1], multi_g[,2], sep = "_")
-  rownames(single_features) <- paste(single_g[,1], single_g[,2], sep = "_")
+  k_range <- base_k:(2 * base_k)
+  metrics <- data.frame()
+  models  <- list()
   
-  # --- Step C: Optimal Cluster Search (Grid Search) ---
-  n_clusters_range <- k_base:(2 * k_base)
-  metrics <- data.frame(k = integer(), db = numeric(), ch = numeric(), sil = numeric())
-  stored_kmeans <- list()
-  
-  set.seed(CONFIG$seed)
-  
-  for (n_k in n_clusters_range) {
-    km_res <- kmeans(multi_features, centers = n_k, iter.max = CONFIG$iter_max, nstart = CONFIG$n_start)
+  for (k in k_range) {
+    km <- kmeans(multi_mtx, centers = k, iter.max = 150, nstart = 40)
     
-    # Calculate Indices
-    # Note: DB Index minimization, Silhouette maximization
-    db_val  <- clusterSim::index.DB(multi_features, km_res$cluster)$DB
-    sil_res <- cluster::silhouette(km_res$cluster, dist(multi_features))
-    sil_avg <- mean(sil_res[, 3])
-    
-    # NbClust for CH index (suppress output)
-    # capturing output to avoid cluttering console
-    temp_ch <- capture.output({
-      ch_res <- NbClust(multi_features, min.nc = n_k, max.nc = n_k, method = "kmeans", index = "ch")
-    })
-    ch_val <- ch_res$All.index[[1]]
-    
-    metrics <- rbind(metrics, data.frame(k = n_k, db = db_val, ch = ch_val, sil = sil_avg))
-    stored_kmeans[[as.character(n_k)]] <- km_res
+    # Methodology: "Optimal k was selected by maximizing the average Silhouette Score"
+    sil <- summary(cluster::silhouette(km$cluster, dist(multi_mtx)))$avg.width
+    metrics <- rbind(metrics, data.frame(k = k, silhouette = sil))
+    models[[as.character(k)]] <- km
   }
   
-  # Select Optimal K based on Silhouette Coefficient
-  optimal_k <- metrics$k[which.max(metrics$sil)]
-  best_model <- stored_kmeans[[as.character(optimal_k)]]
+  best_k <- metrics$k[which.max(metrics$silhouette)]
+  final_model <- models[[as.character(best_k)]]
   
-  cat("   Optimal K (Silhouette):", optimal_k, "\n")
+  cat(paste("Optimal k selected:", best_k, "\n"))
+
   
-  # Save Clustering Metrics
-  write.csv(metrics, file.path(CONFIG$output_dir, paste0("metrics_slice", crop_id, ".csv")), row.names = FALSE)
-  saveRDS(stored_kmeans, file.path(CONFIG$output_dir, paste0("kmeans_models_slice", crop_id, ".rds")))
-  
-  # --- Step D: Distance Calculation ---
-  dist_multi_df <- data.frame()
-  dist_single_list <- list()
-  
-  for (j in 1:optimal_k) {
-    # Isolate points in current cluster and the center
-    cluster_points <- multi_features[best_model$cluster == j, , drop = FALSE]
-    center_point   <- best_model$centers[j, , drop = FALSE]
-    
-    # Calculate distances
-    d_multi  <- calc_euclidean_dist(cluster_points, center_point)
-    d_single <- calc_euclidean_dist(single_features, center_point)
-    
-    # Store Multi Results
-    dist_multi_df <- rbind(dist_multi_df, data.frame(
-      ID = names(d_multi),
-      dist = d_multi,
-      cluster = paste0("c", j) # Using 'j' for cluster ID instead of 'i' to avoid confusion
-    ))
-    
-    # Store Single Results
-    dist_single_list[[paste0("c", j)]] <- d_single
+  # --- Step C: Distance Calculation ---  
+  # 1. Establish Baseline Distances (Within Multi-cropping)
+  dist_ref <- data.frame()
+  for (j in 1:best_k) {
+    cluster_pts <- multi_mtx[final_model$cluster == j, ]
+    center_pt   <- final_model$centers[j, ]
+    dists <- calc_euclidean_dist(cluster_pts, center_pt)
+    dist_ref <- rbind(dist_ref, data.frame(dist = dists, cluster = paste0("c", j)))
   }
   
-  # Format Single Distances into Dataframe
-  dist_single_df <- as.data.frame(dist_single_list)
-  dist_single_df$ID <- rownames(single_features)
-  
-  # --- Step E: Scoring and Comparison ---
-  
-  # 1. Process Multi-Cropping (Reference)
-  multi_summary <- dist_multi_df %>%
+  # Get min/max for normalization
+  cluster_stats <- dist_ref %>%
     group_by(cluster) %>%
-    summarise(min_dist = min(dist), max_dist = max(dist), .groups = 'drop')
+    summarise(min_d = min(dist), max_d = max(dist), .groups = 'drop')
   
-  multi_scored <- dist_multi_df %>%
-    left_join(multi_summary, by = "cluster") %>%
-    rowwise() %>%
-    mutate(score = calc_score(dist, min_dist, max_dist)) %>%
-    ungroup() %>%
-    mutate(systems = "multi")
+  # 2. Calculate Distance for Single Cropping Grids
+  dist_cand_list <- list()
+  for (j in 1:best_k) {
+    center_pt <- final_model$centers[j, ]
+    dist_cand_list[[paste0("c", j)]] <- calc_euclidean_dist(single_mtx, center_pt)
+  }
   
-  # 2. Process Single-Cropping (Candidates)
-  # Compare single grid to all clusters, find the closest one
-  single_long <- dist_single_df %>%
+  # Assign to nearest centroid and filter out unsuitable areas
+  single_long <- as.data.frame(dist_cand_list) %>%
+    mutate(ID = rownames(single_mtx)) %>%
     pivot_longer(-ID, names_to = 'cluster', values_to = 'dist') %>%
-    left_join(multi_summary, by = "cluster") %>%
-    filter(dist >= min_dist & dist <= max_dist) %>% # Must be within range
+    left_join(cluster_stats, by = "cluster")
+  
+  valid_candidates <- single_long %>%
+    filter(dist >= min_d & dist <= max_d) %>%
     group_by(ID) %>%
-    filter(dist == min(dist)) %>% # Select best match
+    filter(dist == min(dist)) %>% # Nearest centroid logic
     ungroup()
   
-  single_scored <- single_long %>%
+  
+  # --- Step D: Normalization ---
+  
+  final_D_values <- valid_candidates %>%
     rowwise() %>%
-    mutate(score = calc_score(dist, min_dist, max_dist)) %>%
+    mutate(normalized_D = calc_normalized_d(dist, min_d, max_d)) %>%
     ungroup() %>%
-    select(ID, dist, cluster, score)
+    select(ID, cluster, normalized_D)
   
-  # --- Step F: Variable Range Filtering ---
-  # Filter mono-grids ensuring all climate variables are within the min/max range of the multi-grids
+  # --- Step E: Save Result ---
   
-  # Attach original variable values to the scored single grids
-  single_with_vars <- single_features %>%
+  # Merge back with coordinates
+  final_output <- single_mtx %>%
     mutate(ID = rownames(.)) %>%
-    inner_join(single_scored, by = "ID") %>%
-    mutate(systems = "mono")
+    inner_join(final_D_values, by = "ID") %>%
+    select(ID, cluster, normalized_D) # Keep only necessary columns for Eq(2)
   
-  # Calculate min/max for every variable in the multi dataset
-  multi_ranges <- multi_features %>%
-    summarise(across(everything(), list(min = min, max = max)))
-  
-  # Apply filtering iteratively (Fixes logic from original code)
-  single_filtered <- single_with_vars
-  
-  for (var_name in colnames(multi_features)) {
-    min_val <- multi_ranges[[paste0(var_name, "_min")]]
-    max_val <- multi_ranges[[paste0(var_name, "_max")]]
-    
-    single_filtered <- single_filtered %>%
-      filter(.data[[var_name]] >= min_val & .data[[var_name]] <= max_val)
-  }
-  
-  # --- Step G: Final Output ---
-  # Combine Multi and Filtered Single data
-  common_cols <- intersect(names(multi_scored), names(single_filtered))
-  final_df <- rbind(
-    multi_scored %>% select(all_of(common_cols)),
-    single_filtered %>% select(all_of(common_cols))
-  )
-  
-  # Save Result
-  write.csv(final_df, file.path(CONFIG$output_dir, paste0("clustered_slice", crop_id, ".csv")), row.names = FALSE)
-  
-  message(paste0(">>> Finished Crop ID: ", crop_id))
+  write.csv(final_output, 
+            file.path(OUTPUT_DIR, paste0("distance_component_clim_crop_", crop_id, ".csv")), 
+            row.names = FALSE)
 }
 
-# ------------------------------------------------------------------------------
-# 5. EXECUTION
-# ------------------------------------------------------------------------------
 
-# Run for specific indices (uncomment as needed)
-# 1:7 represents the rows in the PARAMS dataframe
-purrr::walk(1:7, ~run_clustering(.x))
 
-message("All tasks completed.")
+################## 4. EXECUTION
+## Run for all 7 crop systems
+## Note: 'base_k' represents the observed number of systems (lower bound of k search)
+run_params <- data.frame(
+  id = c(1, 2, 3, 4, 5, 6, 7),
+  k  = c(2, 2, 4, 3, 2, 4, 4)
+)
+
+purrr::pwalk(run_params, ~analyze_transition_potential(crop_id = ..1, base_k = ..2))
+
+message("Distance calculation complete. Proceed to next script for weighted sum (Eq 2).")
