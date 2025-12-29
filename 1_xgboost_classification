@@ -1,1 +1,190 @@
+# ==========================================================================================
+# ARTICLE: Assessing the global potential for transition from single to multiple cropping
+# METHODOLOGY: Section 2.2.2 "Importance of variables"
+#
+# DESCRIPTION:
+# This script trains an eXtreme Gradient Boosting (XGBoost) classifier to 
+# identify relationships between cropping systems and the full set of variables.
+#
+# WORKFLOW:
+# 1. Data Splitting: Stratified 80/20 split (Training/Test).
+# 2. Resampling: SMOTE is applied within the resampling loop to handle class imbalance.
+# 3. Training: 
+#    - MODE A (Default): Trains using pre-determined optimal hyperparameters.
+#    - MODE B (Tuning): Performs full grid search (5-fold CV, 3 repeats).
+# 4. Interpretation: Computes SHAP values to rank variable importance.
+# ==========================================================================================
 
+
+
+################## 1. SETUP & LIBRARIES
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(
+  dplyr, caret, xgboost, themis,       # Modeling & Sampling
+  shapviz, ggplot2, patchwork,         # Interpretation & Plotting
+  openxlsx, here                       # IO
+)
+
+## Define paths
+INPUT_DIR  <- here::here("data")
+OUTPUT_DIR <- here::here("results", "xgboost")
+
+if (!dir.exists(OUTPUT_DIR)) dir.create(OUTPUT_DIR, recursive = TRUE)
+
+args = commandArgs(trailingOnly = T)
+slice <- args[1]
+
+################## 2. CONFIGURATION
+## Set to TRUE to run the full grid search (Time consuming!).
+## Set to FALSE to use the optimal hyperparameters found in the study (Fast).
+RUN_FULL_TUNING <- FALSE 
+
+## Optimal Hyperparameters (from Supercomputer runs)
+## These are samples used to test results.
+OPTIMAL_PARAMS <- list(
+  "1" = data.frame(nrounds=500, max_depth=6, eta=0.05, gamma=0, colsample_bytree=1, min_child_weight=1, subsample=0.75),
+  "2" = data.frame(nrounds=500, max_depth=6, eta=0.1,  gamma=0, colsample_bytree=1, min_child_weight=1, subsample=0.75),
+  "3" = data.frame(nrounds=1000, max_depth=9, eta=0.05, gamma=0, colsample_bytree=1, min_child_weight=1, subsample=1.0),
+  "4" = data.frame(nrounds=500, max_depth=6, eta=0.05, gamma=0, colsample_bytree=1, min_child_weight=1, subsample=0.75),
+  "5" = data.frame(nrounds=300, max_depth=3, eta=0.1,  gamma=0, colsample_bytree=1, min_child_weight=1, subsample=0.50),
+  "6" = data.frame(nrounds=500, max_depth=6, eta=0.05, gamma=0, colsample_bytree=1, min_child_weight=1, subsample=0.75),
+  "7" = data.frame(nrounds=1000, max_depth=9, eta=0.05, gamma=0, colsample_bytree=1, min_child_weight=1, subsample=1.0)
+)
+
+
+
+################## 3. HELPER FUNCTIONS
+## Calculate and rank SHAP Values
+calculate_shap <- function(model_obj, X_pred, output_suffix) {
+  
+  shap_obj <- shapviz(model_obj, X_pred = data.matrix(X_pred))
+  
+  # Summing absolute SHAP values across all classes to get global importance
+  fea_imp <- sv_importance(shap_obj, kind = "no") %>% 
+    rowMeans() %>%
+    as.data.frame() %>% 
+    rename(importance = 1) %>% 
+    mutate(
+      feature = rownames(.),
+      cumu_sum = cumsum(importance),
+      cumu_per = cumu_sum / sum(importance) * 100
+    ) %>%
+    select(feature, everything())
+  
+  write.csv(fea_imp, file.path(OUTPUT_DIR, paste0("shap_importance_", output_suffix, ".csv")), row.names = FALSE)
+  return(fea_imp)
+}
+
+
+
+################## 4. CORE LOGIC (Section 2.2.2)
+run_xgboost_analysis <- function(crop_id) {
+  
+  message(paste0("\n>>> Starting XGBoost Analysis for Crop ID: ", crop_id))
+  
+  # --- Step A: Load and Clean Data ---
+  file_path <- file.path(INPUT_DIR, paste0("slice", crop_id, ".rds"))
+  if (!file.exists(file_path)) stop("File not found: ", file_path)
+  
+  df <- readRDS(file_path) %>%
+    as.data.frame() %>%
+    select(-any_of(c("nfery", "pfery"))) %>% # Remove unused columns
+    select(-matches("pest")) %>%
+    na.omit()
+
+  
+  # --- Step B: Stratified Split ---
+  set.seed(114514)
+  train_idx <- createDataPartition(df$TarVar, p = 0.8, list = FALSE)
+  
+  training <- df[train_idx, ]
+  testing  <- df[-train_idx, ]
+  
+  # Predictors (X) and Response (Y)
+  x_train <- training %>% select(-TarVar)
+  y_train <- as.factor(training$TarVar)
+  x_test  <- testing %>% select(-TarVar)
+  y_test  <- as.factor(testing$TarVar)
+  
+  
+  # --- Step C: Model Training Configuration ---
+  if (RUN_FULL_TUNING) {
+    
+    fit_control <- trainControl(
+      method = "repeatedcv",
+      number = 5,
+      repeats = 3,
+      sampling = "smote", 
+      summaryFunction = multiClassSummary,
+      classProbs = TRUE,
+      allowParallel = TRUE
+    )
+    
+    xgb_grid <- expand.grid(
+      nrounds = c(300, 500, 1000),
+      eta = c(0.05, 0.1),
+      max_depth = c(3, 6, 9),
+      gamma = 0,
+      colsample_bytree = 1,
+      min_child_weight = 1,
+      subsample = c(0.5, 0.75, 1)
+    )
+    
+  } else {
+    # REPRODUCTION MODE: Use optimal parameters
+    message("   Using pre-defined optimal hyperparameters.")
+    
+    fit_control <- trainControl(
+      method = "none",     # No resampling needed, we have the best params
+      sampling = "smote",  # Still apply SMOTE to the full training set
+      classProbs = TRUE,
+      allowParallel = TRUE
+    )
+    
+    # Load optimal params for this specific crop
+    xgb_grid <- OPTIMAL_PARAMS[[as.character(crop_id)]]
+  }
+  
+  
+  # --- Step D: Train Model ---
+  set.seed(215)
+  xgb_model <- train(
+    x = x_train,
+    y = y_train,
+    method = "xgbTree",
+    trControl = fit_control,
+    tuneGrid = xgb_grid,
+    metric = "Mean_Balanced_Accuracy"
+  )
+  
+  # Save Model
+  saveRDS(xgb_model, file.path(OUTPUT_DIR, paste0("xgb_model_slice", crop_id, ".rds")))
+  
+  
+  # --- Step E: Evaluation ---
+  preds <- predict(xgb_model, newdata = x_test)
+  cm    <- confusionMatrix(preds, y_test)
+  
+  # Save Performance Metrics
+  perf_list <- list(
+    Overall = cm$overall,
+    ByClass = cm$byClass,
+    ConfusionMatrix = cm$table
+  )
+  write.xlsx(perf_list, file.path(OUTPUT_DIR, paste0("performance_slice", crop_id, ".xlsx")), rowNames = TRUE)
+  
+  
+  # --- Step F: SHAP Interpretation ---
+  calculate_shap(xgb_model$finalModel, X_pred = x_test, output_suffix = paste0("slice", crop_id))
+  
+  message(paste0(">>> Completed Crop ID: ", crop_id))
+}
+
+
+
+################## 5. EXECUTION
+# Run analysis for all crops (1 through 7)
+# Use purrr::walk to iterate cleanly
+purrr::walk(1:7, ~run_xgboost_analysis(.x))
+
+message("All XGBoost models trained and SHAP values generated.")
