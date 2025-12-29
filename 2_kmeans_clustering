@@ -22,13 +22,13 @@
 if (!require("pacman")) install.packages("pacman")
 pacman::p_load(dplyr, purrr, tidyr, stringr, NbClust, cluster, here)
 
-# Define paths relative to project root
+## Define paths relative to project root
 INPUT_DIR  <- here::here("data")
 OUTPUT_DIR <- here::here("results", "transition_potential")
 
 if (!dir.exists(OUTPUT_DIR)) dir.create(OUTPUT_DIR, recursive = TRUE)
 
-# Set seed for reproducible K-means clustering
+## Set seed for reproducible K-means clustering
 set.seed(215)
 
 
