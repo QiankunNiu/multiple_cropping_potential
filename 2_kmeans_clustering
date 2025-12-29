@@ -68,7 +68,6 @@ analyze_transition_potential <- function(crop_id, base_k) {
 
   # --- Step A: Variable Selection ---
   # Loads feature importance to identify the specific variables for the group "climate variation".
-  
   feat_file <- list.files(here::here("results"), pattern = "feaimp", full.names = TRUE)[crop_id]
   fea_imp <- read.csv(feat_file) %>%
     rename(feature = 1) %>%
@@ -78,7 +77,7 @@ analyze_transition_potential <- function(crop_id, base_k) {
   # Select variables (regex can be adjusted for Water/Soil groups in other runs)
   group_vars <- fea_imp$feature[str_detect(fea_imp$feature, "^(BIO|gdd|gsl)")]
   
-  # Load Data
+  # Load data
   crop_df <- readRDS(file.path(INPUT_DIR, paste0("slice", crop_id, ".rds")))
   dataset <- crop_df %>% select(x, y, TarVar, any_of(group_vars))
   
@@ -95,7 +94,6 @@ analyze_transition_potential <- function(crop_id, base_k) {
   
   # --- Step B: K-means Clustering ---
   # Optimal k was selected by maximizing the average Silhouette Score
-
   k_range <- base_k:(2 * base_k)
   metrics <- data.frame()
   models  <- list()
@@ -115,7 +113,7 @@ analyze_transition_potential <- function(crop_id, base_k) {
 
   
   # --- Step C: Distance Calculation ---  
-  # 1. Establish Baseline Distances (Within Multi-cropping)
+  # Establish baseline distances (within multiple cropping)
   dist_ref <- data.frame()
   for (j in 1:best_k) {
     cluster_pts <- multi_mtx[final_model$cluster == j, ]
@@ -149,8 +147,7 @@ analyze_transition_potential <- function(crop_id, base_k) {
     ungroup()
   
   
-  # --- Step D: Normalization ---
-  
+  # --- Step D: Normalization ---  
   final_D_values <- valid_candidates %>%
     rowwise() %>%
     mutate(normalized_D = calc_normalized_d(dist, min_d, max_d)) %>%
@@ -159,8 +156,6 @@ analyze_transition_potential <- function(crop_id, base_k) {
 
 
   # --- Step E: Save Result ---
-  # Merge back with coordinates
-
   final_output <- single_mtx %>%
     mutate(ID = rownames(.)) %>%
     inner_join(final_D_values, by = "ID") %>%
