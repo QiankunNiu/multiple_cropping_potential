@@ -4,6 +4,8 @@ PAPER TITLE: Assessing the global potential for transition from single to multip
 
 AUTHORS: Qiankun Niu*, Mika Jalava, Vilma Sandström, Kpade O.L. Hounkpatin, Sina Masoumzadeh Sayyar, Dandan Zhao, Matias Heino, Matti Kummu*  
 *: Corresponding author
+qiankun.niu@aalto.fi
+matti.kummu@aalto.fi
 
 PUBLICATION: Agricultural Systems (2026)
 
