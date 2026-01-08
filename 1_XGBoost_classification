@@ -71,7 +71,7 @@ calculate_shap <- function(model_obj, X_pred, output_suffix) {
     ) %>%
     select(feature, everything())
   
-  write.csv(fea_imp, file.path(OUTPUT_DIR, paste0("shap_importance_", output_suffix, ".csv")), row.names = FALSE)
+  write.csv(fea_imp, file.path(OUTPUT_DIR, paste0("feaimp_", output_suffix, ".csv")), row.names = FALSE)
   return(fea_imp)
 }
 
@@ -168,11 +168,11 @@ run_xgboost_analysis <- function(crop_id) {
     ByClass = cm$byClass,
     ConfusionMatrix = cm$table
   )
-  write.xlsx(perf_list, file.path(OUTPUT_DIR, paste0("performance_slice", crop_id, ".xlsx")), rowNames = TRUE)
+  write.xlsx(perf_list, file.path(OUTPUT_DIR, paste0("performance_", crop_id, ".xlsx")), rowNames = TRUE)
   
   
   # --- Step F: SHAP Interpretation ---
-  calculate_shap(xgb_model$finalModel, X_pred = x_test, output_suffix = paste0("slice", crop_id))
+  calculate_shap(xgb_model$finalModel, X_pred = x_test, output_suffix = paste0(crop_id))
 }
 
 
