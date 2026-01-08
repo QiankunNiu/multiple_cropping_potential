@@ -58,7 +58,22 @@ OPTIMAL_PARAMS <- list(
 calculate_shap <- function(model_obj, X_pred, output_suffix) {
   
   shap_obj <- shapviz(model_obj, X_pred = data.matrix(X_pred))
-  
+
+  # Save raw SHAP values per class
+  if (is.list(shap_obj)) {
+    if (is.null(names(shap_obj))) {
+      names(shap_obj) <- paste0("class", seq_along(shap_obj))
+    }
+    
+    for (nm in names(shap_obj)) {
+      S_mat <- shap_obj[[nm]]$S
+      
+      write.csv(as.data.frame(S_mat), 
+                file.path(OUTPUT_DIR, paste0("feashap_raw_m_", nm, "_", output_suffix, ".csv")), 
+                row.names = FALSE)
+    }
+  }
+
   # Summing absolute SHAP values across all classes to get global importance
   fea_imp <- sv_importance(shap_obj, kind = "no") %>% 
     rowMeans() %>%
