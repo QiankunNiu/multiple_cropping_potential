@@ -63,9 +63,6 @@ calc_normalized_d <- function(dist_val, min_d, max_d) {
 
 ################## 3. CORE LOGIC (Section 2.2.3)
 analyze_transition_potential <- function(crop_id, base_k) {
-  message(paste0("\n--- Processing Crop System ID: ", crop_id, " ---"))
-
-
   # --- Step A: Variable Selection ---
   # Loads feature importance to identify the specific variables for the group "climate variation".
   feat_file <- list.files(here::here("results"), pattern = "feaimp", full.names = TRUE)[crop_id]
@@ -127,7 +124,7 @@ analyze_transition_potential <- function(crop_id, base_k) {
     group_by(cluster) %>%
     summarise(min_d = min(dist), max_d = max(dist), .groups = 'drop')
   
-  # 2. Calculate Distance for Single Cropping Grids
+  # Calculate Distance for Single Cropping Grids
   dist_cand_list <- list()
   for (j in 1:best_k) {
     center_pt <- final_model$centers[j, ]
@@ -170,12 +167,11 @@ analyze_transition_potential <- function(crop_id, base_k) {
 
 ################## 4. EXECUTION
 ## Run for all 7 crop systems
-## Note: 'base_k' represents the observed number of systems (lower bound of k search)
+## 'base_k' represents the observed number of systems (lower bound of k search)
 run_params <- data.frame(
   id = c(1, 2, 3, 4, 5, 6, 7),
   k  = c(2, 2, 4, 3, 2, 4, 4)
 )
 
 purrr::pwalk(run_params, ~analyze_transition_potential(crop_id = ..1, base_k = ..2))
-
 message("Distance calculation complete. Proceed to next script for weighted sum (Eq 2).")
