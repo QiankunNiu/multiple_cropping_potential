@@ -159,7 +159,8 @@ analyze_transition_potential <- function(crop_id, base_k) {
     select(ID, cluster, normalized_D) # Keep only necessary columns for Eq(2)
   
   write.csv(final_output, 
-            file.path(OUTPUT_DIR, paste0("distance_component_clim_crop_", crop_id, ".csv")), 
+            file.path(OUTPUT_DIR, paste0("distance_clim_crop_", crop_id, ".csv")), 
+            # The common names should be ("distance_", group, "_crop_", crop_id, ".csv")
             row.names = FALSE)
 }
 
