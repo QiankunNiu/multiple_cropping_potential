@@ -1,1 +1,162 @@
+# ==========================================================================================
+# ARTICLE: Assessing the global potential for transition from single to multiple cropping
+# METHODOLOGY: Section 2.2.3 "Transition potential from single to multiple cropping"
+#
+# DESCRIPTION:
+# This script calculates the final Transition Potential (PoT) for each grid cell.
+# It implements Equation (2): PoT = Sum(Importance_Weight * Normalized_Distance)
+#
+# WORKFLOW:
+# 1. Weight Calculation: Aggregates XGBoost feature importance into 5 groups 
+#    (climate variation, water availability, environmental conditions, agriculture inputs, 
+#    socioeconomic performance).
+# 2. Integration: Merges the normalized distance (D) files for all 5 groups.
+# 3. Aggregation: Computes the weighted sum to get the final PoT score.
+# 4. Filtering: Applies the 90% threshold rule to create a buffer transition zone around 
+#    existing multiple cropping areas
+# 5. Thresholding: Calculate global 25th and 75th percentiles of PoT based on cumulative 
+#    area distribution.
+# ==========================================================================================
 
+
+
+################## 1. SETUP & LIBRARIES
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(dplyr, purrr, tidyr, stringr, readr, here)
+
+## Define paths
+INPUT_IMP_DIR  <- here::here("results", "xgboost") 
+INPUT_DIST_DIR <- here::here("results", "transition_potential")
+OUTPUT_DIR     <- here::here("results", "final_pot")
+
+if (!dir.exists(OUTPUT_DIR)) dir.create(OUTPUT_DIR, recursive = TRUE)
+
+
+
+################## 2. HELPER FUNCTIONS
+calculate_group_weights <- function(crop_id) {
+  # Load feature importance files
+  imp_files <- list.files(INPUT_IMP_DIR, pattern = paste0("feaimp.*", crop_id, ".csv"), full.names = TRUE)
+  
+  if(length(imp_files) == 0) stop(paste("Feature importance file not found for crop", crop_id))
+  
+  fea_imp <- read.csv(imp_files[1]) %>%
+    rename(feature = 1) %>%
+    mutate(row_num = row_number()) %>%
+    # Filter for top 90% cumulative importance
+    filter(cumu_per < 90 | row_num == min(row_num[cumu_per >= 90]))
+  
+  # Group variables based on naming convention regex
+  fea_grouped <- fea_imp %>%
+    mutate(group = case_when(
+      str_detect(feature, "^(BIO|gdd|gsl)") ~ "clim",
+      str_detect(feature, "^(CMI|IWC)")   ~ "wat",
+      str_detect(feature, "^(soil|soc|sph|dem|slope|spo|snt)") ~ "envi",
+      str_detect(feature, "^(nfery|pfery|.*pest)") ~ "agri",
+      str_detect(feature, "^(GDP|aemp|msch|farmsize|time2city)") ~ "soec",
+      TRUE ~ "Other"
+    )) %>%
+    group_by(group) %>%
+    summarise(total_feaimp = sum(feaimp), .groups = 'drop') %>%
+    mutate(weight = total_feaimp / sum(total_feaimp))
+  
+  # Return named vector of weights
+  weights <- setNames(fea_grouped$weight, fea_grouped$group)
+  return(weights)
+}
+
+
+
+################## 3. CALCULATE PoT
+compute_pot_for_crop <- function(crop_id) {
+  # --- Step A: Get Weights (Imp) --- 
+  weights <- calculate_group_weights(crop_id)
+  
+
+  # --- Step B: Load Distance (D) --- 
+  read_dist_file <- function(group) {
+    f <- file.path(INPUT_DIST_DIR, paste0("distance_", group, "_", crop_id, ".csv"))
+    if (!file.exists(f)) stop(paste("Missing distance file:", f))
+    read_csv(f, show_col_types = FALSE) %>%
+      select(ID, systems = 2, dist = normalized_D) # Standardize column names
+  }
+  
+  # Load all 5 components
+  # For the purpose of this script, we assume the user has run the loop for all groups.
+  d_clim <- read_dist_file("clim") %>% rename(clim = dist)
+  d_wat  <- read_dist_file("wat")  %>% rename(wat = dist)
+  d_envi <- read_dist_file("envi") %>% rename(envi = dist)
+  d_agri <- read_dist_file("agri") %>% rename(agri = dist)
+  d_soec <- read_dist_file("soec") %>% rename(soec = dist)
+  
+
+  # --- Step C: Join Data --- 
+  df_merged <- d_clim %>%
+    inner_join(d_wat,  by = c("ID", "systems")) %>%
+    inner_join(d_envi, by = c("ID", "systems")) %>%
+    inner_join(d_agri, by = c("ID", "systems")) %>%
+    inner_join(d_soec, by = c("ID", "systems")) %>%
+    na.omit()
+  
+
+  # --- Step D: Calculate Weighted Sum (Equation 2) --- 
+  get_w <- function(n) if(n %in% names(weights)) weights[[n]] else 0
+  
+  df_calculated <- df_merged %>%
+    rowwise() %>%
+    mutate(PoT = (clim * get_w("clim")) + 
+                 (wat  * get_w("wat")) + 
+                 (envi * get_w("envi")) + 
+                 (agri * get_w("agri")) + 
+                 (soec * get_w("soec"))) %>%
+    ungroup()
+  
+
+  # --- Step E: Apply Stability Constraint (Filtering) --- 
+  multi_ref <- df_calculated %>% filter(systems == "multi")
+  mono_valid <- df_calculated %>% filter(systems == "mono")
+
+  dis_th <- max(multi_ref$PoT) * 0.9
+  final_df <- single %>% filter(PoT <= dis_th)
+
+  # Saving the result
+  output_file <- file.path(OUTPUT_DIR, paste0("final_pot_crop_", crop_id, ".csv"))
+  write.csv(final_df, output_file, row.names = FALSE)
+}
+
+
+
+################## 4. EXECUTION
+# Run for crops 1 through 6 (Rainfed wheat excluded)
+crops_to_process <- c(1, 2, 3, 4, 5, 6)
+
+purrr::walk(crops_to_process, ~compute_pot_for_crop(.x))
+
+
+
+################## 5. GLOBAL THRESHOLDS & CLASSIFICATION
+## Combine all valid mono pixels into one global distribution
+## @area_mono: area for single cropping under each crop systems from Waha et al. (2020)
+global_df <- do.call(rbind, all_crops_pot) %>%
+  na.omit() %>%
+  arrange(PoT) %>%
+  mutate(
+    cum_area = cumsum(area_mono),
+    prop_area = cum_area / sum(area_mono)
+  )
+
+## Calculate 25th and 75th percentiles
+th_25 <- global_df %>% filter(prop_area >= 0.25) %>% slice(1) %>% pull(PoT)
+th_75 <- global_df %>% filter(prop_area >= 0.75) %>% slice(1) %>% pull(PoT)
+
+cat(sprintf("Calculated Thresholds:\n  High Potential (<= 25%%): %.3f\n  Marginal Potential (>= 75%%): %.3f\n", th_25, th_75))
+
+## Classification Function
+classify_pot <- function(df, t1, t2) {
+  df %>%
+    mutate(class = case_when(
+      PoT <= t1 ~ "High",
+      PoT > t1 & PoT < t2 ~ "Moderate",
+      PoT >= t2 ~ "Marginal"
+    ))
+}
